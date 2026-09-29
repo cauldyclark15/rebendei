@@ -7,5 +7,5 @@
     "strict": true,
     "types": ["bun"]
   },
-  "exclude": ["node_modules"]
+  "exclude": ["node_modules", "packages/create-rebendei/template"]
 }
