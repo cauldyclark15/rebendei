@@ -1,0 +1,12 @@
+{
+  "name": "@rebendei/server",
+  "version": "0.0.1",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "dev": "bun --watch src/index.js",
+    "start": "bun src/index.js",
+    "migrate": "bun src/migrate.js",
+    "test": "bun test"
+  }
+}
