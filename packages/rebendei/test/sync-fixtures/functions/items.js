@@ -1,0 +1,15 @@
+import { action, internalQuery, mutation, query, RebendeiError, v } from "../../../src/api.js";
+export const insert = mutation({ args: { group: v.string(), score: v.number(), value: v.number() }, handler: (ctx, args) => ctx.db.insert("sync_items", args) });
+export const set = mutation({ args: { id: v.id("sync_items"), value: v.number() }, handler: async (ctx, { id, value }) => { await ctx.db.patch(id, { value }); return value; } });
+export const noop = mutation({ handler: () => null });
+export const get = query({ args: { id: v.id("sync_items") }, handler: async (ctx, { id }) => (await ctx.db.get(id))?.value ?? null });
+export const getAgain = get;
+export const setBoth = mutation({ args: { a: v.id("sync_items"), b: v.id("sync_items"), value: v.number() }, handler: async (ctx, { a, b, value }) => { await ctx.db.patch(a, { value }); await ctx.db.patch(b, { value }); return value; } });
+export const range = query({ args: { group: v.string(), lo: v.number(), hi: v.number() }, handler: (ctx, { group, lo, hi }) => ctx.db.query("sync_items").withIndex("by_group_score", (/** @type {any} */ q) => q.eq("group", group).gte("score", lo).lt("score", hi)).collect() });
+export const constant = query({ handler: async ctx => { await ctx.db.query("sync_items").collect(); return { z: 1, a: { b: 2 } }; } });
+export const fail = query({ handler: () => { throw new RebendeiError({ code: "QUERY_FAILED" }); } });
+export const recover = query({ args: { id: v.id("sync_items") }, handler: async (ctx, { id }) => { const doc = await ctx.db.get(id); if (doc?.value === 0) throw new RebendeiError({ code: "ZERO" }); return doc?.value ?? null; } });
+export const secret = internalQuery({ handler: () => "secret" });
+export const echo = action({ handler: (_ctx, args) => args });
+export const failAction = action({ handler: () => { throw new RebendeiError({ code: "ACTION_FAILED" }); } });
+export const failMutation = mutation({ handler: () => { throw new RebendeiError({ code: "MUTATION_FAILED" }); } });

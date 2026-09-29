@@ -3,6 +3,7 @@ import { config } from "./config.js";
 import { createEngine, FunctionNotFoundError } from "./engine/index.js";
 import { RebendeiError } from "./api.js";
 import { isPlainObject } from "./values/index.js";
+import { createSync } from "./sync/index.js";
 
 /** @param {{ port?: number, sql?: import("bun").SQL, functionsDir?:string, engine?:Awaited<ReturnType<typeof createEngine>> }} [opts] */
 export function startServer(opts = {}) {
@@ -10,6 +11,8 @@ export function startServer(opts = {}) {
   /** @type {Promise<Awaited<ReturnType<typeof createEngine>>>|undefined} */
   let engineReady = opts.engine ? Promise.resolve(opts.engine) : undefined;
   function getEngine() { return engineReady ??= createEngine({ sql, functionsDir: opts.functionsDir }); }
+  /** @type {Promise<ReturnType<typeof createSync>>|undefined} */
+  let syncReady;
   const server = Bun.serve({
     port: opts.port ?? config.port,
     async fetch(req, srv) {
@@ -37,19 +40,28 @@ export function startServer(opts = {}) {
             { status: error instanceof FunctionNotFoundError ? 404 : 400 });
         }
       }
-      if (url.pathname === "/sync" && srv.upgrade(req)) return;
+      if (url.pathname === "/sync") {
+        try {
+          await (syncReady ??= getEngine().then(createSync));
+          if (srv.upgrade(req)) return;
+          return new Response("Expected WebSocket upgrade", { status: 426 });
+        } catch {
+          return new Response("Sync unavailable", { status: 503 });
+        }
+      }
       return new Response("Not found", { status: 404 });
     },
     websocket: {
-      // Sync protocol lands in milestone 4; for now echo a hello.
-      open(ws) {
-        ws.send(JSON.stringify({ type: "hello", server: "rebendei" }));
-      },
-      message() {},
+      async open(ws) { (await syncReady)?.open(ws); },
+      async message(ws, message) { (await syncReady)?.message(ws, message); },
+      async close(ws) { (await syncReady)?.close(ws); },
     },
   });
   return { server, sql, getEngine, stop: async () => {
     server.stop(true);
-    try { if (engineReady) await (await engineReady).close(); } finally { await sql.close(); }
+    try {
+      if (syncReady) await (await syncReady).stop();
+      if (engineReady) await (await engineReady).close();
+    } finally { await sql.close(); }
   } };
 }

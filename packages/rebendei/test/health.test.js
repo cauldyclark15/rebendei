@@ -26,7 +26,8 @@ test("sync websocket says hello", async () => {
   const ws = new WebSocket(`ws://localhost:${app.server.port}/sync`);
   const msg = await new Promise((resolve) => ws.addEventListener("message", (e) => resolve(JSON.parse(String(e.data)))));
   ws.close();
-  expect(msg).toEqual({ type: "hello", server: "rebendei" });
+  expect(msg).toMatchObject({ type: "hello", server: "rebendei" });
+  expect(msg.version).toBeString();
 });
 
 test("pgvector distance works", async () => {
