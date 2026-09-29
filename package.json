@@ -1,20 +1,17 @@
 {
-  "name": "rebendei",
+  "name": "rebendei-monorepo",
   "private": true,
   "type": "module",
   "workspaces": ["packages/*"],
   "scripts": {
     "db:up": "docker compose up -d --wait",
     "db:down": "docker compose down",
-    "migrate": "bun run --cwd packages/server migrate",
-    "dev": "bun run --cwd packages/server dev",
-    "start": "bun run --cwd packages/server start",
-    "test": "bun run --cwd packages/server test"
-  },
-  "engines": {
-    "bun": ">=1.3.0"
+    "migrate": "bun packages/rebendei/bin/rebendei.js migrate",
+    "dev": "bun packages/rebendei/bin/rebendei.js dev",
+    "test": "bun test"
   },
   "devDependencies": {
-    "@types/bun": "^1.4.2"
-  }
+    "@types/bun": "latest"
+  },
+  "engines": { "bun": ">=1.3.0" }
 }

@@ -25,4 +25,6 @@ document store — on Bun and Postgres.
 5. Indexes (`withIndex`) and range-precise invalidation.
 6. Vector indexes and search.
 7. Schedulers and cron.
+
+Done alongside milestone 1: `rebendei` CLI and `create-rebendei` generator.
 8. Vanilla-JS client library.

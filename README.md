@@ -11,14 +11,34 @@ gets fresh results the moment the data it read changes.
 
 > Status: early scaffold. See [ARCHITECTURE.md](./ARCHITECTURE.md) for the plan.
 
-## Quick start
+## Create a backend
+
+```sh
+npx create-rebendei my-app      # or: bunx create-rebendei my-app
+cd my-app
+bun run db:up                   # Postgres 17 + pgvector in Docker
+bun run dev                     # http://localhost:3210
+```
+
+Needs [Bun](https://bun.sh) and Docker (or your own Postgres with pgvector via `DATABASE_URL`).
+
+## CLI
+
+```
+rebendei dev       apply migrations, then start the server
+rebendei start     start the server
+rebendei migrate   apply pending migrations
+rebendei db:up     start local Postgres + pgvector
+rebendei db:down   stop it
+```
+
+## Working on Rebendei itself
 
 ```sh
 cp .env.example .env
-bun run db:up       # starts Postgres 17 + pgvector on port 54329
-bun run migrate     # applies SQL migrations
-bun run dev         # server on http://localhost:3210
-curl localhost:3210/health
+bun install
+bun run db:up
+bun run dev
 ```
 
 ## Tests
@@ -31,10 +51,10 @@ bun run db:up && bun test
 
 ```
 packages/
-  server/        the backend (HTTP + WebSocket, function runtime, sync engine)
-    src/
-    migrations/  plain SQL, applied in filename order
-    test/
+  rebendei/         the backend + `rebendei` CLI (npm: rebendei)
+    bin/ src/ migrations/ test/
+  create-rebendei/  project generator (npm: create-rebendei)
+    template/
 ```
 
 ## Not affiliated

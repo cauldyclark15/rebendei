@@ -1,0 +1,12 @@
+{
+  "name": "create-rebendei",
+  "version": "0.1.0",
+  "description": "Create a new Rebendei backend",
+  "license": "MIT",
+  "type": "module",
+  "bin": { "create-rebendei": "index.js" },
+  "files": ["index.js", "template"],
+  "engines": { "node": ">=18" },
+  "repository": { "type": "git", "url": "git+https://github.com/cauldyclark15/rebendei.git", "directory": "packages/create-rebendei" },
+  "keywords": ["rebendei", "create", "scaffold", "bun", "backend"]
+}
