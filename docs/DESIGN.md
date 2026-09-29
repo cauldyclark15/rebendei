@@ -280,6 +280,91 @@ same transaction as the document write. `ctx.vectorSearch(table, index,
 cosine similarity; `filter` is `(q) => q.eq(field, value)` or `q.or(...)` over
 declared `filterFields`.
 
+## RAG (`rebendei/rag`)
+
+Retrieval-augmented generation built in, zero dependencies. Embedding and chat
+models are reached over plain `fetch` to an **OpenAI-compatible** HTTP API, so
+the free local path (Ollama, LM Studio, llama.cpp server) and hosted providers
+(OpenAI, OpenRouter, etc.) all work through one code path.
+
+```js
+// rebendei/rag.js  (app code)
+import { RAG, openaiCompatible } from "rebendei/rag";
+
+export const rag = new RAG({
+  embedding: openaiCompatible.embedding({
+    baseURL: process.env.EMBEDDING_BASE_URL ?? "http://localhost:11434/v1", // Ollama default
+    apiKey: process.env.EMBEDDING_API_KEY,   // optional
+    model: process.env.EMBEDDING_MODEL ?? "nomic-embed-text",
+    dimensions: 768,
+  }),
+  chat: openaiCompatible.chat({ baseURL, apiKey, model }),   // optional, for generateText
+  filterNames: ["category", "userId"],                        // allowed filter keys
+  chunker: { maxChars: 2000, overlapChars: 200 },             // default
+});
+```
+
+`rag.js` is not a function module (like `schema.js`). The `rag` object's
+methods take `ctx` first and work in **actions** (they call the model) unless
+noted:
+
+```js
+await rag.add(ctx, { namespace, key?, text? | chunks?: string[] | {text, metadata?}[],
+                     title?, metadata?, filterValues?: [{ name, value }],
+                     importance?: number /* 0..1, default 1 */ })
+  -> { entryId, status: "ready" | "replaced" | "unchanged", created: boolean }
+// key: stable per-namespace id; re-adding the same key replaces the entry
+// atomically (old chunks removed in the same txn). Same key + same content hash
+// -> "unchanged", no embedding calls.
+
+await rag.search(ctx, { namespace, query: string | number[], limit = 10,
+                        filters?: [{ name, value }],   // AND across names, exact match
+                        vectorScoreThreshold?: number,
+                        chunkContext?: { before: 0, after: 0 },
+                        searchType?: "vector" | "text" | "hybrid" /* default "hybrid" */ })
+  -> { results: [{ entryId, key, order, score, content: [{ text, metadata }] }],
+       entries: [{ entryId, key, title, metadata, filterValues }],
+       text: string }   // results joined in entry+order order, for prompting
+// hybrid = reciprocal rank fusion (k = 60) of pgvector cosine and Postgres
+// full-text (websearch_to_tsquery, 'simple' config) rankings.
+
+await rag.generateText(ctx, { namespace, prompt, search?: {...search args},
+                              system?, maxContextChars = 12000 })
+  -> { text, context: <search result> }
+
+// Callable from queries/mutations too (no model call):
+await rag.list(ctx, { namespace, paginationOpts }) -> { page, isDone, continueCursor }
+await rag.getEntry(ctx, { namespace, key }) -> entry | null
+await rag.delete(ctx, { namespace, key })  // mutations and actions
+await rag.deleteNamespace(ctx, { namespace })
+```
+
+Storage (migration owned by the RAG lane):
+
+- `rag_namespaces(id text pk, name text unique, dimensions int, model text)` —
+  the first `add` fixes dimensions+model; a mismatch later is an error.
+- `rag_entries(id text pk, namespace_id, key text, title, metadata jsonb,
+  filter_values jsonb, content_hash text, importance real, created_at,
+  unique(namespace_id, key))`.
+- `rag_chunks(entry_id, namespace_id, "order" int, text, metadata jsonb, embedding vector,
+  tsv tsvector generated from text, pk(entry_id, "order"))`, GIN on `tsv`, and a
+  **partial HNSW index per namespace** on `(embedding::vector(<dims>))
+  vector_cosine_ops WHERE namespace_id = '<id>'`, created with the namespace.
+- Embedding calls happen **before** the write transaction, never inside it.
+- Live updates: RAG writes join the normal commit (commit ts, `commits` row,
+  NOTIFY) and report writes on the synthetic table `_rag:<namespace>`;
+  `rag.list/getEntry` record a whole-table read range on that table. Engine seam
+  for this: every ctx carries a non-enumerable `ctx[ENGINE_INTERNAL]`
+  (`ENGINE_INTERNAL = Symbol.for("rebendei.engineInternal")`) =
+  `{ sql /* current txn handle */, recordRead(range), recordWrite(write),
+  runInMutation(fn: (internal) => Promise<T>) -> Promise<T> /* actions only:
+  runs fn in a fresh committed mutation txn */ }`.
+- Model calls: batched (≤ 64 inputs per request), retried with backoff on
+  429/5xx (max 4), timeout 60 s, errors surface as `RebendeiError` with
+  `{ provider, status }` and never include the API key.
+- Tests use a fake OpenAI-compatible server (`Bun.serve`, port 0) with a
+  deterministic embedding (e.g. hashed bag-of-words), so CI needs no model.
+
 ## Migrations
 
 `packages/rebendei/migrations/NNNN_name.sql`, applied in order by `migrate()`.
