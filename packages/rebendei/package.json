@@ -9,7 +9,8 @@
     ".": "./src/index.js",
     "./server": "./src/api.js",
     "./values": "./src/values/index.js",
-    "./client": "./src/client/index.js"
+    "./client": "./src/client/index.js",
+    "./rag": "./src/rag/index.js"
   },
   "bin": { "rebendei": "bin/rebendei.js" },
   "files": ["bin", "src", "migrations"],

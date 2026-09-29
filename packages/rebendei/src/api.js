@@ -1,6 +1,7 @@
 import { asValidator } from "./values/index.js";
 export { v } from "./values/index.js";
 export { defineSchema, defineTable } from "./schema.js";
+export { cronJobs } from "./scheduler/crons.js";
 export const IS_FUNCTION = Symbol.for("rebendei.function");
 /** @typedef {'query'|'mutation'|'action'} FunctionKind */
 /** @typedef {{[IS_FUNCTION]:true,kind:FunctionKind,visibility:'public'|'internal',args:import('./values/index.js').Validator|undefined,handler:(ctx:any,args:any)=>any}} FunctionDef */

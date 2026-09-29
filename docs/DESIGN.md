@@ -356,7 +356,7 @@ Storage (migration owned by the RAG lane):
   `rag.list/getEntry` record a whole-table read range on that table. Engine seam
   for this: every ctx carries a non-enumerable `ctx[ENGINE_INTERNAL]`
   (`ENGINE_INTERNAL = Symbol.for("rebendei.engineInternal")`) =
-  `{ sql /* current txn handle */, recordRead(range), recordWrite(write),
+  `{ sql /* current txn handle, null in actions */, rootSql /* pool, for reads outside a txn */, recordRead(range), recordWrite(write),
   runInMutation(fn: (internal) => Promise<T>) -> Promise<T> /* actions only:
   runs fn in a fresh committed mutation txn */ }`.
 - Model calls: batched (≤ 64 inputs per request), retried with backoff on

@@ -4,11 +4,12 @@ import { loadFunctions } from "./loader.js";
 import { backfillIndexes } from "./indexes.js";
 import { createDatabase } from "./storage.js";
 import { mutationTransaction, queryTransaction } from "./transactions.js";
+import { installFeatures } from "../features.js";
 export { readSetOverlaps } from "./read-set.js";
 export { encodeKey, compareKeys } from "./keys.js";
 export const ENGINE_INTERNAL = Symbol.for("rebendei.engineInternal");
 export class FunctionNotFoundError extends Error {}
-/** @typedef {{sql:import('bun').TransactionSQL|null,recordRead:(range:import('./types.js').Range)=>void,recordWrite:(write:import('./types.js').Write)=>void,runInMutation?:(fn:(internal:EngineInternal)=>Promise<any>)=>Promise<any>}} EngineInternal */
+/** @typedef {{sql:import('bun').TransactionSQL|null,rootSql:import('bun').SQL,recordRead:(range:import('./types.js').Range)=>void,recordWrite:(write:import('./types.js').Write)=>void,runInMutation?:(fn:(internal:EngineInternal)=>Promise<any>)=>Promise<any>}} EngineInternal */
 /** @param {{sql:import('bun').SQL,functionsDir?:string}} options */
 export async function createEngine({ sql, functionsDir = resolve("rebendei") }) {
   functionsDir = resolve(functionsDir);
@@ -33,7 +34,7 @@ export async function createEngine({ sql, functionsDir = resolve("rebendei") }) 
   /** @param {import('../api.js').FunctionKind} kind @param {import('bun').TransactionSQL|null} tx @param {import('./types.js').ReadSet} readSet @param {import('./types.js').Write[]} writes @param {any} meta */
   function context(kind, tx, readSet, writes, meta) {
     /** @type {EngineInternal} */ const internal = {
-      sql: tx, recordRead(range) { readSet.ranges.push(structuredClone(range)); },
+      sql: tx, rootSql: sql, recordRead(range) { readSet.ranges.push(structuredClone(range)); },
       recordWrite(write) { writes.push(structuredClone(write)); },
     };
     /** @type {any} */ const ctx = {};
@@ -101,6 +102,7 @@ export async function createEngine({ sql, functionsDir = resolve("rebendei") }) 
     onCommit(listener) { listeners.add(listener); return () => { listeners.delete(listener); }; },
     async close() { closed = true; listeners.clear(); },
   };
+  await installFeatures(engine);
   await engine.load();
   return engine;
 }
