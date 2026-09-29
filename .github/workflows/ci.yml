@@ -6,6 +6,8 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: postgres://rebendei:rebendei@localhost:54329/rebendei
     services:
       postgres:
         image: pgvector/pgvector:pg17
