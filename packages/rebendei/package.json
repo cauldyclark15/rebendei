@@ -7,7 +7,9 @@
   "main": "src/index.js",
   "exports": {
     ".": "./src/index.js",
-    "./server": "./src/server.js"
+    "./server": "./src/api.js",
+    "./values": "./src/values/index.js",
+    "./client": "./src/client/index.js"
   },
   "bin": { "rebendei": "bin/rebendei.js" },
   "files": ["bin", "src", "migrations"],
