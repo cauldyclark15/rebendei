@@ -172,7 +172,7 @@ test("long names, uppercase and ambiguous delimiters have distinct bounded physi
   expect(name).toBe(vectorTableName(table, index));
   expect(vectorTableName("a__b", "c")).not.toBe(vectorTableName("a", "b__c"));
   expect(vectorTableName("a-b", "c")).not.toBe(vectorTableName("a_b", "c"));
-  expect(vectorTableName("Articles", "Embedding")).toBe("rv_Articles__Embedding");
+  expect(vectorTableName("Articles", "Embedding")).toMatch(/^rv_t_[0-9a-f]{48}$/);
   await Bun.write(join(functionsDir, "schema.js"), `import {defineSchema, defineTable, v} from ${JSON.stringify(apiURL)};
 export default defineSchema({${JSON.stringify(table)}:defineTable({embedding:v.array(v.number())}).vectorIndex(${JSON.stringify(index)}, {vectorField:"embedding",dimensions:3})});`);
   await engine.load();
@@ -210,3 +210,31 @@ test("2000 mutation-written documents use HNSW, filtered iterative scan and prin
   // GUC changes are transaction-local, never leaked back into the pool.
   expect((await sql`SELECT current_setting('hnsw.ef_search') AS ef_search`)[0].ef_search).toBe("40");
 }, 30000);
+
+test("M2 valid index names cannot collide with another table or its secondary relations", async () => {
+  const names = ["embedding", "embedding_hnsw", "embedding_filter", "embedding_f0", "embedding_pkey", "a__b", "a_b"];
+  await Bun.write(join(functionsDir, "schema.js"), `import {defineSchema, defineTable, v} from ${JSON.stringify(apiURL)};
+export default defineSchema({articles:defineTable({embedding:v.array(v.number()),channel:v.string()})${names.map(name => `.vectorIndex(${JSON.stringify(name)}, {vectorField:"embedding",dimensions:3,filterFields:["channel"]})`).join("")}});`);
+  await engine.load();
+  const id = await insert({ embedding: [1, 0, 0], channel: "a" });
+  const relations = await sql`SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relname LIKE 'rv_%'`;
+  expect(new Set(relations.map((/** @type {any} */ row) => row.relname)).size).toBe(relations.length);
+  for (const index of names) expect(await search({ index, eq: ["channel", "a"] })).toEqual([{ _id: id, _score: 1 }]);
+});
+
+
+test("legacy 0004 physical tables rebuild and backfill automatically on reload", async () => {
+  const id = await insert({ embedding: [1, 0, 0], channel: "a" });
+  const legacy = "rv_articles__by_embedding";
+  await sql.begin(async tx => {
+    await tx.unsafe(`ALTER TABLE ${quote(tableName)} RENAME TO ${quote(legacy)}`);
+    await tx`UPDATE vector_indexes SET pg_table_name=${legacy} WHERE table_name='articles' AND index_name='by_embedding'`;
+  });
+  await engine.load();
+  expect((await sql`SELECT to_regclass(${legacy}) AS relation`)[0].relation).toBeNull();
+  expect((await sql`SELECT pg_table_name FROM vector_indexes WHERE table_name='articles' AND index_name='by_embedding'`)[0].pg_table_name).toBe(tableName);
+  expect(await search({ eq: ["channel", "a"] })).toEqual([{ _id: id, _score: 1 }]);
+  const [before] = await sql`SELECT ${tableName}::regclass::oid AS oid`;
+  await engine.load();
+  expect((await sql`SELECT ${tableName}::regclass::oid AS oid`)[0].oid).toBe(before.oid);
+});

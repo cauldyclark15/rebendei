@@ -184,6 +184,14 @@ export class RAG {
     if (searchType === "text" && typeof query !== "string") throw new Error("Text search requires a string query");
     if (!Number.isFinite(vectorScoreThreshold)) throw new Error("Invalid vectorScoreThreshold");
     return i.rootSql.begin("ISOLATION LEVEL REPEATABLE READ READ ONLY", async (sql) => {
+      // The model call above can outlive a delete/recreate. Validate in the same
+      // snapshot as retrieval, before casting or comparing any query vectors.
+      const [currentNamespace] = await sql`SELECT * FROM rag_namespaces WHERE name=${namespace}`;
+      if (!currentNamespace) return { results: [], entries: [], text: "" };
+      this.compatible(currentNamespace);
+      if (currentNamespace.id !== namespaceRow.id || currentNamespace.generation !== namespaceRow.generation) {
+        throw new RebendeiError({ reason: "RAG namespace changed during search; retry search" });
+      }
       await sql`SELECT set_config('hnsw.ef_search', ${String(efSearch)}, true)`;
       await sql`SET LOCAL hnsw.iterative_scan = 'strict_order'`;
       const candidateLimit = Math.max(64, limit * 10);
