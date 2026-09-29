@@ -146,6 +146,8 @@ are cached and re-run only on invalidation.
   timestamp order equals commit order.
 - Each commit writes one row to `commits(ts bigint primary key, writes jsonb,
   created_at timestamptz default now())`, then `NOTIFY rebendei_commit, '<ts>'`.
+  Bun's SQL client has no LISTEN callback yet, so other processes discover commits
+  by polling `commits` every 50 ms; local commits are pushed immediately.
 - A query runs in a `REPEATABLE READ READ ONLY` transaction and reports the
   snapshot timestamp `ts = max(commits.ts)` visible to it (0 if none).
 - Timestamps cross the wire as decimal strings.
@@ -186,6 +188,7 @@ the SQL ordering used for index scans.
 const engine = await createEngine({ sql, functionsDir })
 engine.load()                       // (re)load modules, schema, crons; push indexes
 engine.runQuery(path, args, { internal = false })    -> { value, readSet, ts }
+engine.runQueryInTransaction(tx, path, args, { internal = false, readSet? }) -> { value, readSet }  // caller-owned read txn
 engine.runMutation(path, args, { internal = false }) -> { value, ts, writes }
 engine.runAction(path, args, { internal = false })   -> { value }
 engine.onCommit((ts, writes) => void) -> unsubscribe  // local commits
@@ -272,7 +275,8 @@ export default crons;
 
 ## Vector search
 
-Each `vectorIndex` gets its own table `rv_<table>__<index>` with
+Each `vectorIndex` gets its own table (collision-free hashed name `rv_t_<hash>`,
+recorded in the vector registry) with
 `(doc_id text primary key, embedding vector(<dimensions>), filter jsonb)` and an
 HNSW index (`vector_cosine_ops`). Rows are maintained by an `onWrite` hook in the
 same transaction as the document write. `ctx.vectorSearch(table, index,

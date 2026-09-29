@@ -87,6 +87,16 @@ export async function createEngine({ sql, functionsDir = resolve("rebendei") }) 
         return { value: value === undefined ? null : value, readSet };
       });
     },
+    /** Runs a query inside a caller-owned read transaction (one shared snapshot for a sync batch).
+     * Pass `readSet` to keep the ranges read so far even when the handler throws (so a failing
+     * subscription is re-run when the data it read changes).
+     * @param {import('bun').TransactionSQL} tx @param {string} path @param {any} [args] @param {{internal?:boolean, readSet?:import('./types.js').ReadSet}} [options] */
+    async runQueryInTransaction(tx, path, args = {}, { internal = false, readSet = { ranges: [] } } = {}) {
+      const definition = lookup(path, "query", args, internal);
+      const ctx = context("query", tx, readSet, [], { path, args });
+      const value = await definition.handler(ctx, args);
+      return { value: value === undefined ? null : value, readSet };
+    },
     /** @param {string} path @param {any} [args] @param {{internal?:boolean}} [options] */
     async runMutation(path, args = {}, { internal = false } = {}) {
       const definition = lookup(path, "mutation", args, internal);
