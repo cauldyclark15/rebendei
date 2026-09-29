@@ -2,6 +2,8 @@
 import { connect } from "../src/db.js";
 import { migrate } from "../src/migrate.js";
 import { startServer } from "../src/server.js";
+import { createEngine } from "../src/engine/index.js";
+import { resolve } from "node:path";
 import pkg from "../package.json" with { type: "json" };
 
 if (typeof Bun === "undefined") {
@@ -35,8 +37,12 @@ async function runMigrations() {
   }
 }
 
-function serve() {
-  const { server, stop } = startServer();
+async function serve() {
+  const sql = connect();
+  let engine;
+  try { engine = await createEngine({ sql, functionsDir: resolve("rebendei") }); }
+  catch (error) { await sql.close(); throw error; }
+  const { server, stop } = startServer({ sql, engine });
   console.log(`rebendei listening on http://localhost:${server.port}`);
   const shutdown = async () => { await stop(); process.exit(0); };
   process.on("SIGINT", shutdown);
@@ -52,8 +58,8 @@ async function compose(args) {
 const [cmd] = process.argv.slice(2);
 try {
   switch (cmd) {
-    case "dev": await runMigrations(); serve(); break;
-    case "start": serve(); break;
+    case "dev": await runMigrations(); await serve(); break;
+    case "start": await serve(); break;
     case "migrate": await runMigrations(); break;
     case "db:up": await compose(["up", "-d", "--wait"]); break;
     case "db:down": await compose(["down"]); break;
