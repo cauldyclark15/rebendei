@@ -6,6 +6,7 @@
     "dev": "rebendei dev",
     "start": "rebendei start",
     "migrate": "rebendei migrate",
+    "demo": "bun scripts/demo.js",
     "db:up": "rebendei db:up",
     "db:down": "rebendei db:down"
   },

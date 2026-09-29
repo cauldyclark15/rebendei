@@ -9,7 +9,21 @@ gets fresh results the moment the data it read changes.
 - **Database:** PostgreSQL + [pgvector](https://github.com/pgvector/pgvector)
 - **Dependencies:** none at runtime — Bun's built-in HTTP/WebSocket server and Postgres client
 
-> Status: early scaffold. See [ARCHITECTURE.md](./ARCHITECTURE.md) for the plan.
+## Features
+
+- **Real-time queries:** WebSocket subscriptions update when the data they read changes.
+- **Transactions:** validated mutations commit atomically with serializable retries.
+- **Scheduler and crons:** transactional scheduled jobs and recurring UTC schedules.
+- **Vector search:** pgvector HNSW indexes with filtering.
+- **Built-in RAG:** chunking, local or hosted embeddings, hybrid retrieval, cited answers,
+  and live knowledge entry queries. [RAG guide](./docs/RAG.md).
+- **JavaScript clients:** reactive WebSocket client and one-shot HTTP client for Bun,
+  browsers, and Node. [Client API](./packages/rebendei/src/client/README.md).
+
+The starter includes messages, scheduled reminders, and a RAG knowledge base.
+[Getting started](./docs/GETTING-STARTED.md) · [Architecture](./ARCHITECTURE.md) ·
+[API contract](./docs/DESIGN.md). Early-stage software; the example is not an
+authenticated production service.
 
 ## Create a backend
 
@@ -18,6 +32,8 @@ npx create-rebendei my-app      # or: bunx create-rebendei my-app
 cd my-app
 bun run db:up                   # Postgres 17 + pgvector in Docker
 bun run dev                     # http://localhost:3210
+# In another terminal inside my-app:
+bun run demo                    # three messages with live updates; no model needed
 ```
 
 Needs [Bun](https://bun.sh) and Docker (or your own Postgres with pgvector via `DATABASE_URL`).
@@ -36,7 +52,7 @@ rebendei db:down   stop it
 
 ```sh
 cp .env.example .env
-bun install
+bun install --linker=hoisted     # resolves workspace imports in the starter template
 bun run db:up
 bun run dev
 ```
