@@ -11,5 +11,11 @@ export const fail = query({ handler: () => { throw new RebendeiError({ code: "QU
 export const recover = query({ args: { id: v.id("sync_items") }, handler: async (ctx, { id }) => { const doc = await ctx.db.get(id); if (doc?.value === 0) throw new RebendeiError({ code: "ZERO" }); return doc?.value ?? null; } });
 export const secret = internalQuery({ handler: () => "secret" });
 export const echo = action({ handler: (_ctx, args) => args });
+export const slowGet = query({ args: { id: v.id("sync_items"), label: v.number() }, handler: async (ctx, { id, label }) => {
+  const value = (await ctx.db.get(id))?.value ?? null;
+  await Bun.sleep(70);
+  return { label, value };
+} });
+export const hold = action({ handler: async () => { await Bun.sleep(1200); return null; } });
 export const failAction = action({ handler: () => { throw new RebendeiError({ code: "ACTION_FAILED" }); } });
 export const failMutation = mutation({ handler: () => { throw new RebendeiError({ code: "MUTATION_FAILED" }); } });

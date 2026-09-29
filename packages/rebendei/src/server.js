@@ -4,14 +4,16 @@ import { createEngine, FunctionNotFoundError } from "./engine/index.js";
 import { RebendeiError } from "./api.js";
 import { isPlainObject } from "./values/index.js";
 import { createSync } from "./sync/index.js";
+import { syncLimits } from "./sync/limits.js";
 
-/** @param {{ port?: number, sql?: import("bun").SQL, functionsDir?:string, engine?:Awaited<ReturnType<typeof createEngine>> }} [opts] */
+/** @param {{ port?: number, sql?: import("bun").SQL, functionsDir?:string, engine?:Awaited<ReturnType<typeof createEngine>> } & import("./sync/limits.js").WsOptions} [opts] */
 export function startServer(opts = {}) {
+  const limits = syncLimits(opts);
   const sql = opts.sql ?? opts.engine?.sql ?? connect();
   /** @type {Promise<Awaited<ReturnType<typeof createEngine>>>|undefined} */
   let engineReady = opts.engine ? Promise.resolve(opts.engine) : undefined;
   function getEngine() { return engineReady ??= createEngine({ sql, functionsDir: opts.functionsDir }); }
-  /** @type {Promise<ReturnType<typeof createSync>>|undefined} */
+  /** @type {Promise<Awaited<ReturnType<typeof createSync>>>|undefined} */
   let syncReady;
   const server = Bun.serve({
     port: opts.port ?? config.port,
@@ -42,7 +44,7 @@ export function startServer(opts = {}) {
       }
       if (url.pathname === "/sync") {
         try {
-          await (syncReady ??= getEngine().then(createSync));
+          await (syncReady ??= getEngine().then(engine => createSync(engine, limits)));
           if (srv.upgrade(req)) return;
           return new Response("Expected WebSocket upgrade", { status: 426 });
         } catch {
@@ -52,6 +54,9 @@ export function startServer(opts = {}) {
       return new Response("Not found", { status: 404 });
     },
     websocket: {
+      maxPayloadLength: limits.frameSize,
+      backpressureLimit: limits.pendingBytes,
+      closeOnBackpressureLimit: true,
       async open(ws) { (await syncReady)?.open(ws); },
       async message(ws, message) { (await syncReady)?.message(ws, message); },
       async close(ws) { (await syncReady)?.close(ws); },

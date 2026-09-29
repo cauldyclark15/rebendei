@@ -1,7 +1,7 @@
-import { AsyncLocalStorage } from "node:async_hooks";
 import { RebendeiError } from "../api.js";
-import { ENGINE_INTERNAL } from "../engine/index.js";
-import { createDatabase } from "../engine/storage.js";
+import { queryTransaction } from "../engine/transactions.js";
+import { createSnapshotQueries } from "./snapshot.js";
+import { syncLimits } from "./limits.js";
 import { readSetOverlaps } from "../engine/read-set.js";
 import { isPlainObject } from "../values/index.js";
 import { createCommitFeed } from "./commits.js";
@@ -9,8 +9,7 @@ import { createCommitFeed } from "./commits.js";
 /** @typedef {Awaited<ReturnType<typeof import('../engine/index.js').createEngine>>} Engine
  * @typedef {import('../engine/types.js').ReadSet} ReadSet
  * @typedef {{path:string,args:any,readSet:ReadSet,lastValueJSON?:string,ts:string,initial:boolean}} Subscription
- * @typedef {{socket:import('bun').ServerWebSocket<unknown>,subscriptions:Map<number,Subscription>,ts:string,cursor:string,closed:boolean,queued:boolean,tail:Promise<void>}} Connection
- * @typedef {{readSet:ReadSet,snapshot?:Promise<string>}} Capture
+ * @typedef {{socket:import('bun').ServerWebSocket<unknown>,subscriptions:Map<number,Subscription>,ts:string,cursor:string,closed:boolean,queued:boolean,tail:Promise<void>,pending:number,pendingBytes:number}} Connection
  */
 
 /** @param {any} value @returns {string} */
@@ -28,27 +27,11 @@ const maxTs = (a, b) => BigInt(a) > BigInt(b) ? a : b;
 
 /** One service per startServer; subscriptions and queues are connection-local.
  * @param {Engine} engine
+ * @param {ReturnType<typeof syncLimits>} [limits]
  */
-export function createSync(engine) {
+export async function createSync(engine, limits = syncLimits()) {
   /** @type {Map<import('bun').ServerWebSocket<unknown>,Connection>} */ const connections = new Map();
-  /** @type {AsyncLocalStorage<Capture>} */ const captures = new AsyncLocalStorage();
-  // runQuery discards readSet/ts on failure. Capture both in the same engine
-  // transaction so a throwing reactive query can recover after a relevant write.
-  const captureReads = (/** @type {string} */ kind, /** @type {any} */ ctx) => {
-    const capture = captures.getStore();
-    if (kind !== "query" || !capture) return;
-    const internal = ctx[ENGINE_INTERNAL];
-    capture.snapshot = internal.sql`SELECT COALESCE(max(ts), 0)::text AS ts FROM commits`
-      .then((/** @type {any[]} */ rows) => String(rows[0].ts));
-    const originalRead = internal.recordRead;
-    const recordRead = (/** @type {import('../engine/types.js').Range} */ range) => {
-      capture.readSet.ranges.push(structuredClone(range));
-      originalRead(range);
-    };
-    internal.recordRead = recordRead;
-    ctx.db = createDatabase(internal.sql, engine.schema, "query", recordRead, async () => { throw new Error("Query is read-only"); });
-  };
-  engine.extendCtx.push(captureReads);
+  const queries = await createSnapshotQueries(engine);
 
   /** @param {Connection} connection @param {object} frame */
   function send(connection, frame) {
@@ -56,72 +39,71 @@ export function createSync(engine) {
   }
   /** @param {Connection} connection @param {unknown} error */
   function fatal(connection, error) {
+    if (connection.closed) return;
     send(connection, { type: "fatal", ...wireError(error) });
     connection.closed = true;
     connection.subscriptions.clear();
     connections.delete(connection.socket);
     connection.socket.close(1008, "Invalid sync frame");
   }
-  /** @param {Connection} connection @param {()=>Promise<void>} work */
-  function enqueue(connection, work) {
+  /** @param {Connection} connection @param {()=>Promise<void>} work @param {number} [bytes] */
+  function enqueue(connection, work, bytes) {
+    if (bytes !== undefined) { connection.pending++; connection.pendingBytes += bytes; }
     connection.tail = connection.tail.then(async () => { if (!connection.closed) await work(); })
-      .catch(error => fatal(connection, error));
+      .catch(error => fatal(connection, error))
+      .finally(() => { if (bytes !== undefined) { connection.pending--; connection.pendingBytes -= bytes; } });
   }
-  /** @param {Subscription} sub @param {number} queryId */
-  async function evaluate(sub, queryId) {
-    /** @type {Capture} */ const capture = { readSet: { ranges: [] } };
+  /** @param {import('bun').TransactionSQL} tx @param {Subscription} sub @param {number} queryId */
+  async function evaluate(tx, sub, queryId) {
+    /** @type {ReadSet} */ const readSet = { ranges: [] };
     try {
-      const result = await captures.run(capture, () => engine.runQuery(sub.path, sub.args));
-      await capture.snapshot;
-      return { sub, ts: result.ts, readSet: result.readSet, modification: { type: "updated", queryId, value: result.value } };
+      const value = await queries.run(tx, sub.path, sub.args, readSet);
+      return { sub, readSet, modification: { type: "updated", queryId, value } };
     } catch (error) {
-      const ts = capture.snapshot ? await capture.snapshot : undefined;
-      return { sub, ts, readSet: capture.readSet, modification: { type: "error", queryId, ...wireError(error) } };
+      return { sub, readSet, modification: { type: "error", queryId, ...wireError(error) } };
     }
   }
   /** @param {Connection} connection @param {string} [minimum] */
   async function synchronize(connection, minimum = "0") {
-    let target = maxTs(connection.ts, minimum), cursor = connection.cursor;
-    /** @type {Set<number>} */ const affected = new Set();
-    for (const [id, sub] of connection.subscriptions) if (sub.initial) affected.add(id);
-    while (!connection.closed) {
-      const rows = await engine.sql`SELECT ts::text AS ts, writes FROM commits WHERE ts > ${cursor}::bigint ORDER BY ts`;
+    if (connection.closed) return;
+    // Commit discovery and every affected query share ONE snapshot and connection.
+    // Commits arriving during evaluation remain beyond cursor for the next pass;
+    // unrelated churn cannot force this batch to restart or delay a mutation ack.
+    const batch = await queryTransaction(engine.sql, async tx => {
+      let cursor = connection.cursor;
+      /** @type {Set<number>} */ const affected = new Set();
+      for (const [id, sub] of connection.subscriptions) if (sub.initial) affected.add(id);
+      const rows = await tx`SELECT ts::text AS ts, writes FROM commits WHERE ts > ${cursor}::bigint ORDER BY ts`;
       for (const row of rows) {
         cursor = String(row.ts);
-        target = maxTs(target, cursor);
         for (const [id, sub] of connection.subscriptions) {
           if (BigInt(row.ts) > BigInt(sub.ts) && readSetOverlaps(sub.readSet, row.writes)) affected.add(id);
         }
       }
-      const results = await Promise.all([...affected].flatMap(id => {
+      // Sequential queries also work with pool max:1 and allow isolated savepoints.
+      const results = [];
+      for (const id of affected) {
+        if (connection.closed) break;
         const sub = connection.subscriptions.get(id);
-        return sub ? [evaluate(sub, id)] : [];
-      }));
-      let snapshot = target;
-      for (const result of results) if (result.ts !== undefined) snapshot = maxTs(snapshot, result.ts);
-      // Engine has no multi-query snapshot API. Equal snapshot commit clocks imply
-      // identical logical DB snapshots (commit order is serialized). Retry the whole
-      // affected batch until every query agrees, expanding invalidation through any
-      // intervening commits before publishing. Never label mixed snapshots with max(ts).
-      if (snapshot !== target || results.some(result => result.ts !== undefined && result.ts !== snapshot)) {
-        target = snapshot;
-        continue;
+        if (sub) results.push(await evaluate(tx, sub, id));
       }
-      if (connection.closed) return;
-      /** @type {object[]} */ const modifications = [];
-      for (const result of results) {
-        const id = result.modification.queryId;
-        if (connection.subscriptions.get(id) !== result.sub) continue;
-        const json = canonicalJSON(result.modification);
-        if (result.sub.initial || json !== result.sub.lastValueJSON) modifications.push(result.modification);
-        Object.assign(result.sub, { initial: false, lastValueJSON: json, readSet: result.readSet, ts: snapshot });
-      }
-      connection.cursor = cursor;
-      if (modifications.length || BigInt(connection.ts) < BigInt(minimum)) {
-        connection.ts = snapshot;
-        send(connection, { type: "transition", ts: snapshot, modifications });
-      }
-      return;
+      return { results, cursor };
+    });
+    const { results, cursor, ts: snapshot } = batch;
+    if (BigInt(snapshot) < BigInt(maxTs(connection.ts, minimum))) throw new Error("Sync snapshot precedes committed mutation");
+    if (connection.closed) return;
+    /** @type {object[]} */ const modifications = [];
+    for (const result of results) {
+      const id = result.modification.queryId;
+      if (connection.subscriptions.get(id) !== result.sub) continue;
+      const json = canonicalJSON(result.modification);
+      if (result.sub.initial || json !== result.sub.lastValueJSON) modifications.push(result.modification);
+      Object.assign(result.sub, { initial: false, lastValueJSON: json, readSet: result.readSet, ts: snapshot });
+    }
+    connection.cursor = cursor;
+    if (modifications.length || BigInt(connection.ts) < BigInt(minimum)) {
+      connection.ts = snapshot;
+      send(connection, { type: "transition", ts: snapshot, modifications });
     }
   }
   /** @param {Connection} connection */
@@ -144,6 +126,9 @@ export function createSync(engine) {
   /** @param {Connection} connection @param {any} frame */
   async function handle(connection, frame) {
     if (frame.type === "subscribe") {
+      if (!connection.subscriptions.has(frame.queryId) && connection.subscriptions.size >= limits.subscriptions) {
+        fatal(connection, new Error("Maximum subscriptions exceeded")); return;
+      }
       connection.subscriptions.set(frame.queryId, { path: frame.path, args: Object.hasOwn(frame, "args") ? frame.args : {}, readSet: { ranges: [] }, lastValueJSON: undefined, ts: "0", initial: true });
       await synchronize(connection);
       return;
@@ -168,7 +153,7 @@ export function createSync(engine) {
   return {
     /** @param {import('bun').ServerWebSocket<unknown>} socket */
     open(socket) {
-      const connection = { socket, subscriptions: new Map(), ts: "0", cursor: "0", closed: false, queued: false, tail: Promise.resolve() };
+      const connection = { socket, subscriptions: new Map(), ts: "0", cursor: "0", closed: false, queued: false, tail: Promise.resolve(), pending: 0, pendingBytes: 0 };
       connections.set(socket, connection);
       send(connection, { type: "hello", server: "rebendei", version: "0.1.0" });
     },
@@ -178,12 +163,14 @@ export function createSync(engine) {
       if (!connection) return;
       try {
         if (typeof message !== "string") throw new Error("Expected JSON text frame");
+        const bytes = Buffer.byteLength(message);
+        if (connection.pending >= limits.pending || connection.pendingBytes + bytes > limits.pendingBytes) throw new Error("Maximum pending sync frames/bytes exceeded");
         const frame = JSON.parse(message);
         if (!isPlainObject(frame) || !["subscribe", "unsubscribe", "mutation", "action"].includes(frame.type)) throw new Error("Invalid sync frame type");
         const id = frame.type === "subscribe" || frame.type === "unsubscribe" ? frame.queryId : frame.requestId;
         if (!Number.isSafeInteger(id) || id < 0) throw new Error("Expected nonnegative integer ID");
         if (frame.type !== "unsubscribe" && (typeof frame.path !== "string" || !frame.path)) throw new Error("Expected function path");
-        enqueue(connection, () => handle(connection, frame));
+        enqueue(connection, () => handle(connection, frame), bytes);
       } catch (error) { fatal(connection, error); }
     },
     /** @param {import('bun').ServerWebSocket<unknown>} socket */
@@ -193,7 +180,7 @@ export function createSync(engine) {
     },
     async stop() {
       unsubscribeCommit();
-      engine.extendCtx.splice(engine.extendCtx.indexOf(captureReads), 1);
+      queries.close();
       for (const connection of connections.values()) { connection.closed = true; connection.subscriptions.clear(); }
       const pending = [...connections.values()].map(connection => connection.tail);
       connections.clear();

@@ -16,6 +16,9 @@ export function createCommitFeed(root, receive) {
     again = true;
     if (running) return;
     running = (async () => {
+      // Bound eager passes under continuous local commits; the timer picks up
+      // anything left over, so wake() never requires database-wide quiescence.
+      let passes = 0;
       do {
         again = false;
         const rows = await sql`SELECT ts::text AS ts, writes FROM commits WHERE ts > ${lastTs}::bigint ORDER BY ts`;
@@ -24,7 +27,7 @@ export function createCommitFeed(root, receive) {
           lastTs = String(rows[rows.length - 1].ts);
           receive(rows);
         }
-      } while (again && !stopped);
+      } while (again && !stopped && ++passes < 8);
     })().catch(error => {
       if (!stopped) console.error("rebendei sync commit feed failed; retrying", error);
     }).finally(() => { running = undefined; });

@@ -114,23 +114,28 @@ test("50 rapid mutations converge to final value with monotonically increasing t
   let previous = 0n;
   for (const f of b.frames.filter(f => f.type === "transition")) { expect(BigInt(f.ts) >= previous).toBe(true); previous = BigInt(f.ts); }
 });
-test("mixed query snapshots are retried as one batch and intervening commits expand invalidation", async () => {
+test("one batch keeps a shared snapshot; commits during evaluation invalidate the next batch", async () => {
   const writerServer = app(), readerServer = app(), writer = client(writerServer), reader = client(readerServer);
   const idA = await insert(writer.client), idB = await insert(writer.client);
   const first = reader.client.watchQuery("items:get", { id: idA }); first.onUpdate(() => {});
   const second = reader.client.watchQuery("items:getAgain", { id: idA }); second.onUpdate(() => {});
   const third = reader.client.watchQuery("items:get", { id: idB }); third.onUpdate(() => {});
   await waitFor(() => first.localQueryResult() === 0 && second.localQueryResult() === 0 && third.localQueryResult() === 0);
-  const engine = await readerServer.getEngine(), original = engine.runQuery.bind(engine);
+  const engine = await readerServer.getEngine();
   let paused = false, earlyFinished = false, armed = true;
   /** @type {()=>void} */ let release = () => {};
   const barrier = new Promise(resolve => { release = () => resolve(undefined); });
-  engine.runQuery = async (path, args, options) => {
-    if (armed && path === "items:getAgain") { armed = false; paused = true; await barrier; }
-    const result = await original(path, args, options);
-    if (paused && path === "items:get" && args.id === idA) earlyFinished = true;
-    return result;
+  const pauseRead = (/** @type {string} */ kind, /** @type {any} */ ctx, /** @type {any} */ meta) => {
+    if (kind !== "query") return;
+    const get = ctx.db.get;
+    ctx.db.get = async (/** @type {string} */ id) => {
+      if (armed && meta.path === "items:getAgain") { armed = false; paused = true; await barrier; }
+      const result = await get(id);
+      if (meta.path === "items:get" && id === idA) earlyFinished = true;
+      return result;
+    };
   };
+  engine.extendCtx.push(pauseRead);
   const before = reader.frames.length;
   try {
     await writer.client.mutation("items:set", { id: idA, value: 1 });
@@ -139,9 +144,11 @@ test("mixed query snapshots are retried as one batch and intervening commits exp
     release();
     await waitFor(() => first.localQueryResult() === 2 && second.localQueryResult() === 2 && third.localQueryResult() === 2);
     const transitions = reader.frames.slice(before).filter(f => f.type === "transition");
-    expect(transitions).toHaveLength(1);
-    expect(transitions[0].modifications.map((/** @type {any} */ m) => m.value)).toEqual([2, 2, 2]);
-  } finally { release(); engine.runQuery = original; }
+    expect(transitions).toHaveLength(2);
+    expect(transitions[0].modifications.map((/** @type {any} */ m) => m.value)).toEqual([1, 1]);
+    expect(transitions[1].modifications.map((/** @type {any} */ m) => m.value)).toEqual([2, 2, 2]);
+    expect(BigInt(transitions[1].ts)).toBeGreaterThan(BigInt(transitions[0].ts));
+  } finally { release(); engine.extendCtx.splice(engine.extendCtx.indexOf(pauseRead), 1); }
 });
 
 test("invalid JSON sends fatal then closes, without affecting other clients", async () => {
