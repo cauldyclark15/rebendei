@@ -1,13 +1,21 @@
 # Vector indexes
 
 `defineTable(...).vectorIndex(name, { vectorField, dimensions, filterFields })`
-materializes a registry entry and a quoted `rv_<table>__<index>` table. Names
-longer than 63 bytes, unsafe characters, and ambiguous `__` components receive
-a deterministic hash suffix. HNSW uses cosine distance; filter columns have GIN
+materializes a registry entry and a quoted `rv_t_<hash>` table, using a
+192-bit SHA-256 prefix over the JSON tuple `[table, index]`. Secondary indexes
+use a disjoint `rv_i_` prefix and hash `[physicalTable, role]`; HNSW keeps a
+readable `_hnsw` suffix. Tables have fixed-length names, so implicit `_pkey`
+relations cannot alias tables either. Every name fits PostgreSQL's 63-byte limit.
+HNSW uses cosine distance; filter columns have GIN
 and per-field JSONB btree indexes. DDL, backfill, and registry changes commit
 atomically. Document writes are blocked during schema reconciliation/backfill.
 Changing dimensions, vectorField, or filterFields rebuilds the table; removal
 drops it. Unchanged definitions retain their tables.
+
+The first `engine.load()` after upgrading automatically rebuilds legacy `0004`
+registry names and backfills from stored documents in the same locked transaction.
+No landed migration edits or manual migration are required. This first reload
+incurs backfill cost and blocks document writes until reconciliation commits.
 
 Missing vector fields remove/omit the index row. **Present invalid vectors throw
 and roll back the mutation**, regardless of `schemaValidation`: an ordinary

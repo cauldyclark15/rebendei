@@ -284,3 +284,125 @@ test("encodeKey ordering matches independent comparison and real Postgres bytea 
     expect(rows.map((/** @type {any} */ row) => row.id)).toEqual(expected);
   });
 });
+
+
+test("M3 bounded terminals limit real SQL rows and skip take(0)", async () => {
+  for (let i = 0; i < 256; i++) await insert(i);
+  const { Query } = await import("../src/engine/query.js");
+  const { default: schema } = await import("./fixtures/schema.js");
+  await sql.begin(async (tx) => {
+    let scanned = 0;
+    /** @type {number[]} */ const batches = [];
+    const measured = new Proxy(tx, { get(target, property) {
+      if (property === "unsafe") return async (/** @type {string} */ query, /** @type {any[]} */ params) => {
+        const rows = await target.unsafe(query, params);
+        if (query.includes("FROM index_entries e")) { scanned += rows.length; batches.push(rows.length); }
+        return rows;
+      };
+      return Reflect.get(target, property);
+    } });
+    const q = () => new Query(measured, schema, "messages", () => {}).withIndex("by_channel_score", r => r.eq("channel", "a"));
+    expect(await q().take(0)).toEqual([]); expect(scanned).toBe(0);
+    expect((await q().take(1))[0].score).toBe(0); expect(scanned).toBe(1);
+    scanned = 0; expect((await q().first())?.score).toBe(0); expect(scanned).toBe(1);
+    scanned = 0; await expect(q().unique()).rejects.toThrow("more than one"); expect(scanned).toBe(2);
+    scanned = 0; const page = await q().paginate({ numItems: 1 });
+    expect(page.page[0].score).toBe(0); expect(page.isDone).toBe(false); expect(scanned).toBe(2);
+    scanned = 0; batches.length = 0; let evaluated = 0;
+    const filtered = await q().filter(doc => { evaluated++; return doc.score >= 70; }).take(1);
+    expect(filtered[0].score).toBe(70); expect(evaluated).toBe(71);
+    expect(scanned).toBeLessThan(256); expect(Math.max(...batches)).toBeLessThanOrEqual(1024);
+    await expect(q().take(8193)).rejects.toThrow("8192");
+    await expect(q().paginate({ numItems: 8193 })).rejects.toThrow("8192");
+  });
+});
+
+test("M3 narrowed terminal ranges invalidate inside but not just beyond scanned keys", async () => {
+  const ids = []; for (let i = 0; i < 8; i++) ids.push(await insert(i));
+  for (const order of ["asc", "desc"]) {
+    for (const terminal of ["take", "first", "paginate"]) {
+      const read = await engine.runQuery("messages:range", { channel: "a", terminal, order, count: 1, numItems: 1 });
+      const last = terminal === "paginate" ? 1 : 0;
+      const beyond = order === "asc" ? last + 1 : 6 - last;
+      const outside = await engine.runMutation("messages:patch", { id: ids[beyond], value: { body: "outside" } });
+      expect(readSetOverlaps(read.readSet, outside.writes)).toBe(false);
+      const inside = await engine.runMutation("messages:patch", { id: ids[order === "asc" ? 0 : 7], value: { body: "inside" } });
+      expect(readSetOverlaps(read.readSet, inside.writes)).toBe(true);
+    }
+    const filtered = await engine.runQuery("messages:range", { channel: "a", terminal: "take", count: 1, order, even: true });
+    const flip = await engine.runMutation("messages:patch", { id: ids[order === "asc" ? 0 : 7], value: { score: order === "asc" ? -2 : 8 } });
+    expect(readSetOverlaps(filtered.readSet, flip.writes)).toBe(true);
+    // Restore ordering for subsequent checks.
+    await engine.runMutation("messages:patch", { id: ids[order === "asc" ? 0 : 7], value: { score: order === "asc" ? 0 : 7 } });
+  }
+  const exhausted = await engine.runQuery("messages:range", { channel: "a", terminal: "take", count: 20, even: true });
+  const added = await engine.runMutation("messages:insert", { channel: "a", score: 100 });
+  expect(readSetOverlaps(exhausted.readSet, added.writes)).toBe(true);
+});
+
+
+test("M3 filtered batches and streaming iteration keep conservative finite scanned ranges", async () => {
+  const ids = []; for (let i = 0; i < 256; i++) ids.push(await insert(i));
+  for (const order of ["asc", "desc"]) {
+    const read = await engine.runQuery("messages:range", { channel: "a", terminal: "take", count: 1, order, even: true });
+    const insideIndex = order === "asc" ? 1 : 255;
+    const outsideIndex = order === "asc" ? 64 : 191;
+    const outside = await engine.runMutation("messages:patch", { id: ids[outsideIndex], value: { body: "outside batch" } });
+    expect(readSetOverlaps(read.readSet, outside.writes)).toBe(false);
+    const flip = await engine.runMutation("messages:patch", { id: ids[insideIndex], value: { score: order === "asc" ? -2 : 256 } });
+    expect(readSetOverlaps(read.readSet, flip.writes)).toBe(true);
+    await engine.runMutation("messages:patch", { id: ids[insideIndex], value: { score: insideIndex } });
+  }
+  const { Query } = await import("../src/engine/query.js");
+  const { default: schema } = await import("./fixtures/schema.js");
+  await sql.begin(async tx => {
+    let scanned = 0;
+    /** @type {import('../src/engine/types.js').Range[]} */ const ranges = [];
+    const measured = new Proxy(tx, { get(target, property) {
+      if (property === "unsafe") return async (/** @type {string} */ text, /** @type {any[]} */ params) => {
+        const rows = await target.unsafe(text, params); scanned += rows.length; return rows;
+      };
+      return Reflect.get(target, property);
+    } });
+    const q = new Query(measured, schema, "messages", range => ranges.push(range)).withIndex("by_channel_score", r => r.eq("channel", "a"));
+    for await (const doc of q) { expect(doc.score).toBe(0); break; }
+    expect(scanned).toBe(64);
+    expect(ranges[0].upper?.key[1]).toBe(63);
+  });
+});
+
+test("M3 pagination excludes previous pages, including deleted cursor rows and missing index fields", async () => {
+  for (const order of ["asc", "desc"]) {
+    const ids = []; for (let i = 0; i < 8; i++) ids.push(await insert(i, order));
+    const args = { channel: order, terminal: "paginate", order, numItems: 2, even: true };
+    const first = await engine.runQuery("messages:range", args);
+    const second = await engine.runQuery("messages:range", { ...args, cursor: first.value.continueCursor });
+    expect(second.value.page.map((/** @type {any} */ doc) => doc.score)).toEqual(order === "asc" ? [4, 6] : [2, 0]);
+    expect(second.value.isDone).toBe(true);
+    const earlier = await engine.runMutation("messages:patch", { id: ids[order === "asc" ? 0 : 7], value: { body: "previous page" } });
+    expect(readSetOverlaps(second.readSet, earlier.writes)).toBe(false);
+    // Deleting the last document from page one must not destroy the cursor's key.
+    const cursorId = first.value.page.at(-1)._id;
+    const removed = await engine.runMutation("messages:remove", { id: cursorId });
+    expect(readSetOverlaps(second.readSet, removed.writes)).toBe(false);
+    expect((await engine.runQuery("messages:range", { ...args, cursor: first.value.continueCursor })).value.page).toEqual(second.value.page);
+    // Each direction has its own channel, independent of the deleted cursor row.
+  }
+  const { Query } = await import("../src/engine/query.js");
+  const { default: schema } = await import("./fixtures/schema.js");
+  const missingIds = [await insert(1, "missing"), await insert(2, "missing")];
+  const { writeIndexes } = await import("../src/engine/indexes.js");
+  const missingSchema = { ...schema, tables: { messages: { ...schema.tables.messages,
+    indexes: [...schema.tables.messages.indexes, { name: "by_missing", fields: ["optionalField"] }] } } };
+  const missingDocs = await Promise.all(missingIds.map(async id => (await engine.runQuery("messages:get", { id })).value));
+  await sql.begin(async tx => {
+    for (const doc of missingDocs) await writeIndexes(tx, missingSchema, "messages", doc);
+    const q = () => new Query(tx, missingSchema, "messages", () => {}).withIndex("by_missing", r => r.eq("optionalField", undefined));
+    const first = await q().paginate({ numItems: 1 });
+    const second = await q().paginate({ numItems: 1, cursor: first.continueCursor });
+    expect(second.page).toHaveLength(1); expect(second.isDone).toBe(true);
+    expect(second.page[0]._id).not.toBe(first.page[0]._id);
+    const legacy = JSON.parse(Buffer.from(first.continueCursor, "base64url").toString()); delete legacy.values;
+    expect((await q().paginate({ numItems: 1, cursor: Buffer.from(JSON.stringify(legacy)).toString("base64url") })).page).toEqual(second.page);
+  });
+});

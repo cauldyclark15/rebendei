@@ -7,23 +7,15 @@ import { compileFilter } from "./filter.js";
 const quote = (name) => `"${name.replaceAll('"', '""')}"`;
 /** @param {string} value */
 const literal = (value) => `'${value.replaceAll("'", "''")}'`;
-/** @param {string} raw @param {boolean} [hashRequired] */
-function identifier(raw, hashRequired = false) {
-  const safe = raw.replace(/[^A-Za-z0-9_]/g, "_");
-  if (!hashRequired && safe === raw && safe.length <= 63) return safe;
-  const hash = createHash("sha256").update(raw).digest("hex").slice(0, 16);
-  return `${safe.slice(0, 46)}_${hash}`;
-}
-/** Stable ASCII identifiers, bounded by Postgres's 63-byte limit; disambiguate __ in components.
+/** Hash component tuples, never delimiter-concatenated names. @param {string[]} components */
+const nameHash = (components) => createHash("sha256").update(JSON.stringify(components)).digest("hex").slice(0, 48);
+/** Tables have a fixed length and a disjoint prefix from secondary indexes.
+ * The implicit primary-key name is longer than any table name, so it cannot
+ * alias another table either. All identifiers fit Postgres's 63-byte limit.
  * @param {string} table @param {string} index */
-export function vectorTableName(table, index) {
-  const raw = `rv_${table}__${index}`;
-  if (table.includes("__") || index.includes("__")) {
-    const hash = createHash("sha256").update(JSON.stringify([table, index])).digest("hex").slice(0, 16);
-    return `${raw.replace(/[^A-Za-z0-9_]/g, "_").slice(0, 46)}_${hash}`;
-  }
-  return identifier(raw);
-}
+export function vectorTableName(table, index) { return `rv_t_${nameHash([table, index])}`; }
+/** @param {string} table @param {string} role */
+const indexName = (table, role) => `rv_i_${nameHash([table, role])}_${role === "hnsw" ? "hnsw" : "idx"}`;
 /** @param {Record<string,any>} doc @param {string} path */
 function field(doc, path) {
   let value = doc;
@@ -66,10 +58,10 @@ async function writeRow(tx, index, id, doc, backfill = false) {
 async function createIndex(tx, index) {
   const table = quote(index.pgTable);
   await tx.unsafe(`CREATE TABLE ${table} (doc_id text PRIMARY KEY, embedding vector(${index.dimensions}) NOT NULL, filter jsonb NOT NULL)`);
-  await tx.unsafe(`CREATE INDEX ${quote(identifier(`${index.pgTable}_hnsw`))} ON ${table} USING hnsw (embedding vector_cosine_ops)`);
-  await tx.unsafe(`CREATE INDEX ${quote(identifier(`${index.pgTable}_filter`))} ON ${table} USING gin (filter)`);
+  await tx.unsafe(`CREATE INDEX ${quote(indexName(index.pgTable, "hnsw"))} ON ${table} USING hnsw (embedding vector_cosine_ops)`);
+  await tx.unsafe(`CREATE INDEX ${quote(indexName(index.pgTable, "filter"))} ON ${table} USING gin (filter)`);
   for (const [position, name] of index.filterFields.entries()) {
-    await tx.unsafe(`CREATE INDEX ${quote(identifier(`${index.pgTable}_f${position}`))} ON ${table} ((filter -> ${literal(name)}))`);
+    await tx.unsafe(`CREATE INDEX ${quote(indexName(index.pgTable, `field:${position}`))} ON ${table} ((filter -> ${literal(name)}))`);
   }
   const docs = await tx`SELECT id, value, creation_time FROM documents WHERE table_name = ${index.table}`;
   for (const doc of docs) await writeRow(tx, index, doc.id,
@@ -96,6 +88,8 @@ function definitions(schema) {
 }
 
 /** Materialize schema definitions and install transactional maintenance/action context.
+ * Legacy 0004 registry names differ from vectorTableName(), so reload rebuilds
+ * and backfills them atomically under the same registry/document locks.
  * @param {Awaited<ReturnType<typeof import('../engine/index.js').createEngine>>} engine */
 export async function install(engine) {
   /** @type {MaterializedIndex[]} */ let indexes = [];

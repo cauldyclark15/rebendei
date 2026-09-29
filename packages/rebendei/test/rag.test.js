@@ -225,3 +225,38 @@ test("default is free local Ollama and constructor rejects unsupported HNSW dime
   expect(new RAG().embedding.model).toBe("nomic-embed-text");
   expect(() => new RAG({ embedding: { model: "too-big", dimensions: 3000, embed: async () => [] } })).toThrow("2000");
 });
+
+for (const replacement of [{ model: "other", dimensions: 2 }, { model: "race", dimensions: 3 }, { model: "race", dimensions: 2 }]) {
+test(`M1 search revalidates namespace recreation after embedding (${replacement.model}, ${replacement.dimensions})`, async () => {
+  /** @type {any} */ let actionCtx;
+  const capture = (/** @type {string} */ kind, /** @type {any} */ ctx) => { if (kind === "action") actionCtx = ctx; };
+  engine.extendCtx.push(capture);
+  try { await engine.runAction("docs:removeAction", { namespace: "race", key: "missing" }); }
+  finally { engine.extendCtx.pop(); }
+    const namespace = "race";
+    const initial = new RAG({ embedding: { model: "race", dimensions: 2, embed: async (texts) => texts.map(() => [1, 0]) } });
+    await initial.add(actionCtx, { namespace, key: "old", text: "old" });
+    /** @type {()=>void} */ let started = () => {}, resume = () => {};
+    const paused = new Promise((resolve) => { started = () => resolve(undefined); });
+    const released = new Promise((resolve) => { resume = () => resolve(undefined); });
+    const delayed = new RAG({ embedding: { model: "race", dimensions: 2, embed: async () => { started(); await released; return [[1, 0]]; } } });
+    const pending = delayed.search(actionCtx, { namespace, query: "query", searchType: "vector" }).then(value => ({ value, error: null }), error => ({ value: null, error }));
+    await paused;
+    await initial.deleteNamespace(actionCtx, { namespace });
+    const next = new RAG({ embedding: { ...replacement, embed: async (texts) => texts.map(() => Array.from({ length: replacement.dimensions }, (_, i) => i === 0 ? 1 : 0)) } });
+    await next.add(actionCtx, { namespace, key: "new", text: "new" });
+    resume();
+    const outcome = await pending;
+    expect(outcome.value).toBeNull();
+    expect(outcome.error).toBeInstanceOf(RebendeiError);
+    expect(outcome.error.message).toContain("RAG namespace");
+    if (replacement.model !== "race" || replacement.dimensions !== 2) {
+      expect(outcome.error.message).toContain("dimension/model mismatch");
+      await expect(initial.search(actionCtx, { namespace, query: [1, 0], searchType: "vector" })).rejects.toThrow("dimension/model mismatch");
+    } else {
+      expect(outcome.error.message).toContain("changed during search");
+      expect((await initial.search(actionCtx, { namespace, query: [1, 0], searchType: "vector" })).entries[0].key).toBe("new");
+    }
+    await initial.deleteNamespace(actionCtx, { namespace });
+});
+}
