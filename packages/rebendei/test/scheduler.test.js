@@ -161,12 +161,24 @@ test("killed actions remain inProgress and are never automatically retried", asy
 });
 test("interval cron ticks repeatedly, dedupes across engines, preserves clock, and removes on load", async () => {
   process.env.REBENDEI_SCHEDULER_TEST_CRON = "1";
+  // Workers paused while checking that a reload keeps the cron clock: with a 1s interval a
+  // tick can otherwise legitimately advance next_run between the two reads.
+  await engine.scheduler.stop();
   await engine.load();
   const [first] = await sql`SELECT next_run FROM crons WHERE name='heartbeat'`;
   const other = /** @type {any} */ (await createEngine({ sql: connect(), functionsDir })); extras.push(other);
+  await other.scheduler.stop();
   await engine.load();
-  expect((await sql`SELECT next_run FROM crons WHERE name='heartbeat'`)[0].next_run).toBe(first.next_run);
-  expect((await sql`SELECT * FROM scheduled_jobs WHERE cron_name='heartbeat'`).length).toBe(1);
+  // Reload must keep the cron's phase. If the 1s interval elapsed during the (slow, cold)
+  // second engine start, load() legitimately rolls next_run forward by whole intervals.
+  const reloaded = Number((await sql`SELECT next_run FROM crons WHERE name='heartbeat'`)[0].next_run);
+  expect(reloaded).toBeGreaterThanOrEqual(Number(first.next_run));
+  expect((reloaded - Number(first.next_run)) % 1000).toBe(0);
+  // Two engines loading the same cron must never schedule the same tick twice.
+  const [ticks] = await sql`SELECT count(*)::int AS n, count(DISTINCT cron_run_at)::int AS distinct_n FROM scheduled_jobs WHERE cron_name='heartbeat'`;
+  expect(ticks.n).toBe(ticks.distinct_n);
+  expect(ticks.n).toBe(1 + (reloaded - Number(first.next_run)) / 1000);
+  engine.scheduler.start(); other.scheduler.start();
   await until(async () => (await events()).length >= 2);
   const [count] = await sql`SELECT count(*)::int AS n,count(DISTINCT cron_run_at)::int AS distinct_n FROM scheduled_jobs WHERE cron_name='heartbeat'`;
   expect(count.n).toBe(count.distinct_n);
