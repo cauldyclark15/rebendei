@@ -1,0 +1,13 @@
+import { query, action, mutation } from "../../src/api.js";
+import { rag } from "./rag.js";
+export const add = action({ handler: (ctx, args) => rag.add(ctx, args) });
+export const search = action({ handler: (ctx, args) => rag.search(ctx, args) });
+export const generate = action({ handler: (ctx, args) => rag.generateText(ctx, args) });
+export const list = query({ handler: (ctx, args) => rag.list(ctx, args) });
+export const get = query({ handler: (ctx, args) => rag.getEntry(ctx, args) });
+export const remove = mutation({ handler: (ctx, args) => rag.delete(ctx, args) });
+export const removeNamespace = mutation({ handler: (ctx, args) => rag.deleteNamespace(ctx, args) });
+export const removeAction = action({ handler: (ctx, args) => rag.delete(ctx, args) });
+export const rollback = mutation({ handler: async (ctx, args) => { await rag.delete(ctx, args); throw new Error("rollback"); } });
+export const forbiddenAdd = mutation({ handler: (ctx, args) => rag.add(ctx, args) });
+export const forbiddenDelete = query({ handler: (ctx, args) => rag.delete(ctx, args) });
